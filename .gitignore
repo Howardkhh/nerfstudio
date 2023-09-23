@@ -162,9 +162,9 @@ cython_debug/
 #.idea/
 
 # Experiments and outputs
-outputs/
-exports/
-renders/
+outputs
+exports
+renders
 # tensorboard log files
 events.out.*
 

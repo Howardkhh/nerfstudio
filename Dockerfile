@@ -1,11 +1,7 @@
 ARG CUDA_VERSION=11.8.0
 ARG OS_VERSION=22.04
-ARG USER_ID=1000
 # Define base image.
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${OS_VERSION}
-ARG CUDA_VERSION
-ARG OS_VERSION
-ARG USER_ID
 
 # metainformation
 LABEL org.opencontainers.image.version = "0.1.18"
@@ -22,7 +18,7 @@ ARG CUDA_ARCHITECTURES=90;89;86;80;75;70;61;52;37
 ## Set non-interactive to prevent asking for user inputs blocking image creation.
 ENV DEBIAN_FRONTEND=noninteractive
 ## Set timezone as it is required by some packages.
-ENV TZ=Europe/Berlin
+ENV TZ=Asia/Taipei
 ## CUDA Home, required to find CUDA in some packages.
 ENV CUDA_HOME="/usr/local/cuda"
 
@@ -102,18 +98,6 @@ RUN git clone --branch 3.8 https://github.com/colmap/colmap.git --single-branch 
     cd ../.. && \
     rm -rf colmap
 
-# Create non root user and setup environment.
-RUN useradd -m -d /home/user -g root -G sudo -u ${USER_ID} user
-RUN usermod -aG sudo user
-# Set user password
-RUN echo "user:user" | chpasswd
-# Ensure sudo group users are not asked for a password when using sudo command by ammending sudoers file
-RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
-
-# Switch to new uer and workdir.
-USER ${USER_ID}
-WORKDIR /home/user
-
 # Add local user binary folder to PATH variable.
 ENV PATH="${PATH}:/home/user/.local/bin"
 SHELL ["/bin/bash", "-c"]
@@ -155,21 +139,26 @@ RUN git clone --branch v1.0 --recursive https://github.com/cvg/pixel-perfect-sfm
 
 RUN python3.10 -m pip install omegaconf
 # Copy nerfstudio folder and give ownership to user.
-ADD . /home/user/nerfstudio
+ARG USER=howardkhh
+ARG USER_ID=1014
+ARG STUDENT_GROUP_ID=1001
+RUN groupadd -g $STUDENT_GROUP_ID student
+RUN useradd -u $USER_ID -g student -ms /bin/bash $USER
+RUN groupadd -g 1002 vglusers
+RUN usermod -aG vglusers $USER
+USER $USER
+ADD . /home/$USER/nerfstudio
 USER root
-RUN chown -R user /home/user/nerfstudio
-USER ${USER_ID}
 
 # Install nerfstudio dependencies.
-RUN cd nerfstudio && \
+RUN cd /home/$USER/nerfstudio && \
     python3.10 -m pip install -e . && \
     cd ..
 
-# Change working directory
-WORKDIR /workspace
+RUN chown -Rh $USER:student /home/$USER/nerfstudio
+USER $USER
+WORKDIR /home/$USER/nerfstudio
 
-# Install nerfstudio cli auto completion
-RUN ns-install-cli --mode install
+# Install nerfstudio cli auto completion and enter shell if no command was provided.
+CMD ns-install-cli --mode install && /bin/bash
 
-# Bash as default entrypoint.
-CMD /bin/bash -l
