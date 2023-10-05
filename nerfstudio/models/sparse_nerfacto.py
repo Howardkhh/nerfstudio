@@ -36,9 +36,9 @@ class SparseNerfactoModelConfig(NerfactoModelConfig):
     """Additional parameters for depth supervision."""
 
     _target: Type = field(default_factory=lambda: SparseNerfactoModel)
-    depth_loss_mult: float = 0 #2e-2
+    depth_loss_mult: float = 2e-2
     """Lambda of the depth loss."""
-    distill_continuity_mult: float = 2e-4
+    distill_continuity_mult: float = 2e-3
     """Lambda of the distill continuity loss."""
     is_euclidean_depth: bool = False
     """Whether input depth maps are Euclidean distances (or z-distances)."""
