@@ -427,3 +427,146 @@ class PairPixelSampler(PixelSampler):  # pylint: disable=too-few-public-methods
             pair_indices += indices
             indices = torch.hstack((indices, pair_indices)).view(rays_to_sample * 2, 3)
         return indices
+
+
+@dataclass
+class SparseNerfPixelSamplerConfig(PixelSamplerConfig):
+    """Config dataclass for PairPixelSampler."""
+
+    _target: Type = field(default_factory=lambda: SparseNerfPixelSampler)
+    """Target class to instantiate."""
+    depth_ranking_radius: int = 50
+    """max distance between pairs of depth ranking pixels."""
+    distill_continuity_radius: int = 2
+    """max distance between pairs of distill continuity pixels."""
+
+
+class SparseNerfPixelSampler(PixelSampler):  # pylint: disable=too-few-public-methods
+    """Samples a group of 8 pixels from 'image_batch's. Samples groups of pixels from
+        from the images randomly within a 'radius' distance apart.
+        A group consists of [random pixel, depth ranking pixel, distill continuity pixel * 6]
+
+    Args:
+        config: the PairPixelSamplerConfig used to instantiate class
+    """
+
+    def __init__(self, config: SparseNerfPixelSamplerConfig, **kwargs) -> None:
+        self.config = config
+        self.radius = self.config.depth_ranking_radius
+        self.distill_radius = self.config.distill_continuity_radius
+        super().__init__(self.config, **kwargs)
+        self.rays_to_sample = self.config.num_rays_per_batch // 8
+
+    # overrides base method
+    def sample_method(  # pylint: disable=no-self-use
+        self,
+        batch_size: Optional[int],
+        num_images: int,
+        image_height: int,
+        image_width: int,
+        depth_images: Tensor,
+        mask: Optional[Tensor] = None,
+        device: Union[torch.device, str] = "cpu",
+    ) -> Int[Tensor, "batch_size 3"]:
+        if isinstance(mask, Tensor):
+            raise NotImplementedError("Mask sampling not implemented for SparseNerfPixelSampler")
+            m = erode_mask(mask.permute(0, 3, 1, 2).float(), pixel_radius=self.radius)
+            nonzero_indices = torch.nonzero(m[:, 0], as_tuple=False).to(device)
+            chosen_indices = random.sample(range(len(nonzero_indices)), k=self.rays_to_sample)
+            indices = nonzero_indices[chosen_indices]
+        else:
+            rays_to_sample = self.rays_to_sample
+            if batch_size is not None:
+                assert (
+                    int(batch_size) % 8 == 0
+                ), f"PairPixelSampler can only return batch sizes in multiples of eight (got {batch_size})"
+                rays_to_sample = batch_size // 8
+
+            s = (rays_to_sample, 1)
+            ns = torch.randint(0, num_images, s, dtype=torch.long, device=device)
+            hs = torch.randint(self.radius, image_height - self.radius, s, dtype=torch.long, device=device)
+            ws = torch.randint(self.radius, image_width - self.radius, s, dtype=torch.long, device=device)
+            indices = torch.concat((ns, hs, ws), dim=1)
+
+            pair_indices = torch.hstack(
+                (
+                    torch.zeros(rays_to_sample, 1, device=device, dtype=torch.long),
+                    torch.randint(-self.radius, self.radius, (rays_to_sample, 2), device=device, dtype=torch.long),
+                )
+            )
+            pair_indices += indices
+            pair_indices = pair_indices.unsqueeze(1)
+            
+            distill_indices = torch.cat(
+                (
+                    torch.zeros(rays_to_sample, (2*self.distill_radius+1)**2, 1, device=device, dtype=torch.long),
+                    torch.stack(torch.meshgrid(
+                        torch.arange(-self.distill_radius, self.distill_radius+1, device=device), 
+                        torch.arange(-self.distill_radius, self.distill_radius+1, device=device),
+                        indexing='xy'), 2).view(-1, 2).repeat(rays_to_sample, 1).view(rays_to_sample, -1, 2)
+                ),
+                dim=2
+            ) # rays_to_sample, (2*self.distill_radius+1), 3
+
+            distill_indices += indices.unsqueeze(1)
+            
+            neighbors = depth_images[distill_indices[..., 0], distill_indices[..., 1], distill_indices[..., 2]].view(rays_to_sample, -1)
+            neighbors = torch.abs(neighbors - depth_images[indices[:, 0], indices[:, 1], indices[:, 2]]).to(device)
+
+            _, knn = torch.topk(neighbors, 1+6, dim=1, largest=False)
+            distill_indices = distill_indices[torch.arange(rays_to_sample, device=device).unsqueeze(1), knn[:, 1:]]
+
+            indices = torch.cat((indices.unsqueeze(1), pair_indices, distill_indices), dim=1).view(-1, 3)
+        return indices
+
+
+    def collate_image_dataset_batch(self, batch: Dict, num_rays_per_batch: int, keep_full_image: bool = False):
+        """
+        Operates on a batch of images and samples pixels to use for generating rays.
+        Returns a collated batch which is input to the Graph.
+        It will sample only within the valid 'mask' if it's specified.
+
+        Args:
+            batch: batch of images to sample from
+            num_rays_per_batch: number of rays to sample per batch
+            keep_full_image: whether or not to include a reference to the full image in returned batch
+        """
+
+        device = batch["image"].device
+        num_images, image_height, image_width, _ = batch["image"].shape
+
+        if "mask" in batch:
+            raise NotImplementedError
+            if self.config.is_equirectangular:
+                indices = self.sample_method_equirectangular(
+                    num_rays_per_batch, num_images, image_height, image_width, mask=batch["mask"], device=device
+                )
+            else:
+                indices = self.sample_method(
+                    num_rays_per_batch, num_images, image_height, image_width, mask=batch["mask"], device=device
+                )
+        else:
+            if self.config.is_equirectangular:
+                raise NotImplementedError
+                indices = self.sample_method_equirectangular(
+                    num_rays_per_batch, num_images, image_height, image_width, device=device
+                )
+            else:
+                indices = self.sample_method(num_rays_per_batch, num_images, image_height, image_width, batch["depth_image"], device=device)
+
+        c, y, x = (i.flatten() for i in torch.split(indices, 1, dim=-1))
+        c, y, x = c.cpu(), y.cpu(), x.cpu()
+        collated_batch = {
+            key: value[c, y, x] for key, value in batch.items() if key != "image_idx" and value is not None
+        }
+
+        assert collated_batch["image"].shape[0] == num_rays_per_batch
+
+        # Needed to correct the random indices to their actual camera idx locations.
+        indices[:, 0] = batch["image_idx"][c]
+        collated_batch["indices"] = indices  # with the abs camera indices
+
+        if keep_full_image:
+            collated_batch["full_image"] = batch["image"]
+
+        return collated_batch

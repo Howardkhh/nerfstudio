@@ -22,7 +22,7 @@ from collections import OrderedDict
 from typing import Dict
 
 import tyro
-from nerfstudio.data.pixel_samplers import PairPixelSamplerConfig
+from nerfstudio.data.pixel_samplers import PairPixelSamplerConfig, SparseNerfPixelSamplerConfig
 
 from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
 from nerfstudio.configs.base_config import ViewerConfig
@@ -58,6 +58,7 @@ from nerfstudio.models.nerfacto import NerfactoModelConfig
 from nerfstudio.models.neus import NeuSModelConfig
 from nerfstudio.models.neus_facto import NeuSFactoModelConfig
 from nerfstudio.models.semantic_nerfw import SemanticNerfWModelConfig
+from nerfstudio.models.sparse_nerfacto import SparseNerfactoModelConfig
 from nerfstudio.models.tensorf import TensoRFModelConfig
 from nerfstudio.models.vanilla_nerf import NeRFModel, VanillaModelConfig
 from nerfstudio.pipelines.base_pipeline import VanillaPipelineConfig
@@ -72,6 +73,7 @@ descriptions = {
     "instant-ngp-bounded": "Implementation of Instant-NGP. Recommended for bounded real and synthetic scenes",
     "mipnerf": "High quality model for bounded scenes. (slow)",
     "semantic-nerfw": "Predicts semantic segmentations and filters out transient objects.",
+    "sparse-nerf": "SparseNeRF model.",
     "vanilla-nerf": "Original NeRF model. (slow)",
     "tensorf": "tensorf",
     "dnerf": "Dynamic-NeRF model. (slow)",
@@ -233,6 +235,41 @@ method_configs["depth-nerfacto"] = TrainerConfig(
     viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
     vis="viewer",
 )
+
+
+method_configs["sparse-nerfacto"] = TrainerConfig(
+    method_name="sparse-nerfacto",
+    steps_per_eval_batch=500,
+    steps_per_save=2000,
+    max_num_iterations=30000,
+    mixed_precision=True,
+    pipeline=VanillaPipelineConfig(
+        datamanager=VanillaDataManagerConfig(
+            _target=VanillaDataManager[DepthDataset],
+            pixel_sampler=SparseNerfPixelSamplerConfig(),
+            dataparser=NerfstudioDataParserConfig(),
+            train_num_rays_per_batch=4096,
+            eval_num_rays_per_batch=4096,
+            camera_optimizer=CameraOptimizerConfig(
+                mode="SO3xR3", optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-8, weight_decay=1e-2)
+            ),
+        ),
+        model=SparseNerfactoModelConfig(eval_num_rays_per_chunk=1 << 15),
+    ),
+    optimizers={
+        "proposal_networks": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            "scheduler": None,
+        },
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            "scheduler": None,
+        },
+    },
+    viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+    vis="viewer",
+)
+
 
 method_configs["instant-ngp"] = TrainerConfig(
     method_name="instant-ngp",

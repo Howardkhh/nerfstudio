@@ -568,14 +568,22 @@ def scale_gradients_by_distance_squared(
     return out
 
 
-def depth_ranking_loss(rendered_depth, gt_depth):
+def depth_ranking_loss(rendered_depth, gt_depth, group_size=2):
     """
     Depth ranking loss as described in the SparseNeRF paper
     Assumes that the layout of the batch comes from a PairPixelSampler, so that adjacent samples in the gt_depth
     and rendered_depth are from pixels with a radius of each other
     """
     m = 1e-4
-    dpt_diff = gt_depth[::2, :] - gt_depth[1::2, :]
-    out_diff = rendered_depth[::2, :] - rendered_depth[1::2, :] + m
+    dpt_diff = gt_depth[::group_size, :] - gt_depth[1::group_size, :]
+    out_diff = rendered_depth[::group_size, :] - rendered_depth[1::group_size, :] + m
     differing_signs = torch.sign(dpt_diff) != torch.sign(out_diff)
     return torch.nanmean((out_diff[differing_signs] * torch.sign(out_diff[differing_signs])))
+
+def distill_continuity_loss(rendered_depth):
+    m = 1e-4
+    center_pixels = rendered_depth[::8]
+    rendered_depth = rendered_depth.view(-1, 8, 1)
+    random_neighbor_indices = torch.randint(2, 8, (rendered_depth.shape[0],), device=rendered_depth.device, dtype=torch.long)
+    random_neighbor_pixels = rendered_depth[torch.arange(rendered_depth.shape[0]), random_neighbor_indices]
+    return torch.nanmean(torch.clip(torch.abs(center_pixels-random_neighbor_pixels)-m, min=0))
